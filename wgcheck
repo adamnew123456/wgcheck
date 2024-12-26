@@ -1,0 +1,164 @@
+#!/bin/sh
+
+set -e
+
+##### Utility Functions
+
+# Usage: panic MESSAGE
+#
+# Echoes the message to stderr and then exits.
+panic() {
+    echo "$1" >&2
+    echo "Aborting." >&2
+    exit 1
+}
+
+# Usage: log MESSAGE
+#
+# Writes MESSAGE to stderr with a timestamp.
+log() {
+    echo "($(date '+%D %T')) $1" >&2
+}
+
+# Usage: log_pipe PREFIX
+#
+# Reads messages from stdin and writes them to stdout, with a prefix and the
+# current date.
+log_pipe() {
+    while read -r line ; do
+        log "$1| $line"
+    done
+}
+
+# Usage: check_param NAME
+#
+# Checks that the config parameter NAME has a value. Aborts the script if it is
+# blank.
+check_param() {
+    value="$(eval "echo \"\$$1\"")"
+    [ -n "$value" ] || panic "Config option $1 is required"
+}
+
+# Usage: resolve_tool EXE OVERRIDE
+#
+# Locates the path for EXE if OVERRIDE is empty, or if it is
+# set, validates that VAR points to an executable. Echoes 
+# the final path, or panics if it could not be found.
+resolve_tool() {
+    tool="$2"
+    if [ -z "$tool" ]; then
+        tool="$(command -v "$1")" || panic "No $1 on PATH"
+    fi
+    [ -x "$tool" ] || panic "$tool is not executable"
+    echo "$tool"
+}
+
+# Usage: _ip ...
+#
+# Wrapper around ip that respects tool_ip.
+_ip() {
+    log "Invoking: '$tool_ip $*'"
+    "$tool_ip" "$@"
+}
+
+# Usage: _ipns ...
+#
+# Like _ip but runs the command in the $netns_name 
+# namespace.
+_ipns() {
+    [ -n "$netns_name" ] || panic "netns_name not set for ip"
+    _ip -n "$netns_name" "$@"
+}
+
+# Usage: _nsexec ...
+#
+# Wrapper around 'ip netns exec $netns_name' using _ip 
+_nsexec() {
+    [ -n "$netns_name" ] || panic "netns_name not set for ip"
+    _ip netns exec "$netns_name" "$@"
+}
+
+# Usage: _wg ...
+#
+# Wrapper around wg that respects tool_wg.
+_wg() {
+    log "Invoking: '$tool_wg $*'"
+    "$tool_wg" "$@"
+}
+
+##### Config and Environment
+
+config_file="$1"
+if [ -z "$config_file" ]; then
+    echo "Usage: $0 CONFIG"
+    exit 1
+fi
+
+# Pre-declare config variables for ease of use later on.
+# Easier for shellcheck and autocomplete.
+netns_name=
+wg_name=
+wg_cidr=
+wg_router=
+wg_conf=
+checker=
+alert=
+tool_ip=
+tool_wg=
+
+log "Loading configuration file $config_file"
+. "$config_file"
+
+log "Validating configuration"
+for param in netns_name wg_name wg_cidr wg_router wg_conf checker alert; do
+    check_param $param
+done
+
+[ -x "$checker" ] || panic "$checker is not executable"
+[ -x "$alert" ] || panic "$alert is not executable"
+
+tool_ip="$(resolve_tool ip "$tool_ip")" || exit 1
+tool_wg="$(resolve_tool wg "$tool_wg")" || exit 1
+
+log "Cleaning possibly stale namespace $netns_name"
+_ip netns delete "$netns_name" || log "* Remove failed, continuing"
+
+log "Creating network namespace $netns_name"
+_ip netns add "$netns_name"
+
+log "Cleaning possibly stale interface $wg_name"
+_ip link delete dev "$wg_name" || log "* Remove failed, continuing"
+
+log "Creating Wireguard interface $wg_name"
+_ip link add name "$wg_name" type wireguard
+
+# NOTE: Do this before moving the interface into the namespace! The config may
+# have a hostname and by moving it into the namespace, we break DNS.
+log "Loading Wireguard config from $wg_conf"
+_wg setconf "$wg_name" "$wg_conf"
+
+log "Moving $wg_name into $netns_name"
+_ip link set dev "$wg_name" netns "$netns_name"
+
+log "Setting Wireguard interface IP to $wg_cidr"
+_ipns addr add "$wg_cidr" dev "$wg_name"
+
+log "Bringing up Wireguard interface"
+_ipns link set dev "$wg_name" up
+
+log "Updating $netns_name to route via $wg_router"
+_ipns route add default via "$wg_router"
+
+log "Running checker"
+if _nsexec "$checker" </dev/null 2>&1 ; then
+    log "* Successful"
+else
+    log "* Failure, invoking alert"
+    "$alert" </dev/null 2>&1 || log "* Failed to run alert"
+fi
+
+log "Destroying Wireguard link"
+_ipns link del "$wg_name"
+
+log "Destroying network namespace"
+_ip netns del "$netns_name"
