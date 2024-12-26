@@ -1,9 +1,8 @@
 # What is this?
 
 `wgcheck` is a tool for monitoring the status of a Wireguard connection. It
-periodically checks that it can access specific services through Wireguard, and
-if any become inaccessible it runs an external tool to alert you to the
-failure.
+checks that it can access a specific service through Wireguard, and if it
+cannot it alerts you to the failure.
 
 # How do I use it?
 
@@ -17,10 +16,10 @@ First, you need some tools and configuration files:
 
 - `ip` (via `iproute2`) and `wg` (via `wireguard-tools`). `wgcheck` works by
   creating a network namespace that contains only the Wireguard interface, to
-  avoid accidental leakage and force all service check connections to go over
-  Wireguard (https://www.wireguard.com/netns/ explains the concept well).
-  `wgcheck` has to create the Wireguard interface, create the namespace and move
-  the interface into it, and configure the default route to use that interface.
+  avoid accidental leakage and force the service check to go over Wireguard 
+  (https://www.wireguard.com/netns/ explains the concept well). `wgcheck` 
+  creates a network namespace and the Wireguard interface, and configures the
+  interface and routing within the namespace.
 
 - A service check tool. `wgcheck` itself does not know how to check whether a
   service is up. It delegates this to an external tool.
@@ -30,13 +29,13 @@ First, you need some tools and configuration files:
     indicates the service is down. 
   - stdin is hooked up to `/dev/null`
   - stdout and stderr are passed through.
-  - `checker` is run in a network namespace that only has access to the
-    Wireguard interface. This makes it easy to avoid accidentally reporting a
-    service as up (because you accessed it via the wrong interface), but
-    it also means that `checker` may have a completely broken network. If you
-    need a network connection apart from the specific service you are checking,
-    consider creating a separate service and having `checker` communicate with it
-    via some non-network means (Unix sockets, files, etc)
+  - It is run in a network namespace that only has access to the Wireguard
+    interface. This makes it easy to avoid accidentally reporting a service as up
+    (because you accessed it via the wrong interface), but it also means the
+    checker may have a completely broken network. If you need a network
+    connection apart from the specific service you are checking, consider creating
+    a separate service and having the checker communicate with it via some
+    non-network means (Unix sockets, files, etc)
 
 - An alert tool. As with service checking, `wgcheck` does not know how to
   notify you when the service is inaccessible.
